@@ -145,6 +145,29 @@ npm run check:install -- /absolute/path/to/node_modules/@deepseek-ai/dsh/lib/bin
 
 首版仍需要实际模型任务的端到端效果评测。模型是否调用 DAG、图规划质量、依赖宽度及工具安全声明都会影响收益。插件可与 AgentHint 同时安装，组合加速效果需单独测量。
 
+## 编译式编排内核
+
+`src/compiler` 提供一个与挂载点无关的编译器内核：把任务一次性编译成依赖图，按轮执行并交由评审决定收敛，而不是让模型逐轮决定下一步。它**不替代** `dag_execute`，两者共用同一执行器。
+
+| 模块 | 职责 |
+| --- | --- |
+| `compiler/plan.ts` | 计划文本解析：编号行、`$n` / `${n}` 依赖、`join()` 哨兵、缺编号兜底、只接受字面量参数（不求值、不插值） |
+| `compiler/prompts.ts` | planner / joiner 提示词构造与 joiner 决策解析（`Finish(...)` / `Replan(...)`） |
+| `compiler/engine.ts` | 轮循环：计划 → 执行 → 评审 → 重规划；含轮数上限、token 预算、连续空计划熔断、旧轮次上下文压缩、净变更门禁钩子 |
+
+执行、规划、评审都通过回调注入，因此同一内核可用于工具挂载、`llm/stream` 短路或测试替身：
+
+```js
+import { compile, positionalNodes } from '@sasimoreyang-ai/dsh-dag/compiler'
+
+const result = await compile(
+  { question, knownTools, plannerTools, tokenBudget: 120000 },
+  { plan, join, execute, toNodes: positionalNodes('command'), workingTreeChanged },
+)
+```
+
+**当前边界**：本版本只交付内核与单元测试（解析、决策、轮循环、预算与门禁路径）。与 `llm/stream` 或 `ctx.llm` 的真实接线、以及真实模型任务的端到端评测尚未包含；内核的正确性由 `tests/compiler.test.mjs` 覆盖，不依赖模型。
+
 ## 设计参考与许可
 
 参考了 LLMCompiler 的依赖调度思路，以及提供的 AISBench/DSH DAG 实验资料。本仓库独立实现 TypeScript 调度与 DSH 适配。资料中提及的本地 DSH 原型源码没有随 notes 仓库公开，本实现依据可获取的文档和 DSH 已发布接口开发。[LLMCompiler](https://github.com/SqueezeAILab/LLMCompiler) · [实验资料](https://gitcode.com/liuyang1271/notes/blob/master/src/bench-aisbench-swebench-dag/README.md)

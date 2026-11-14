@@ -11,7 +11,11 @@
       "default": "./lib/index.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./compiler": {
+      "types": "./lib/compiler/index.d.ts",
+      "default": "./lib/compiler/index.js"
+    }
   },
   "files": [
     "lib",
