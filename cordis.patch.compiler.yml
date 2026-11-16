@@ -1,0 +1,13 @@
+# LLMCompiler-as-agent mode: the plugin hooks `llm/stream` and replaces the
+# outer loop's model call with planner → ready-wave dispatch → joiner.
+# Opt-in: it changes how every turn of this profile is produced.
+- insert:
+    - id: dag-compiler
+      name: '@sasimoreyang-ai/dsh-dag/compiler'
+      config:
+        provider: volcano
+        model: deepseek-v4.1-flash
+        temperature: 0
+        maxTokens: 4096
+        maxReplans: 1
+        maxParallel: 8
