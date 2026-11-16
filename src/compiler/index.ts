@@ -146,7 +146,21 @@ export function apply(ctx: Context, config: CompilerConfig): void {
       const agent = resolveAgent(ctx, options.sessionId)
       const deps: CompilerDeps = {
         stream: call => ctx.llm.stream(call),
-        execute: input => ctx.tools.execute(input),
+        // This host dispatches a batch of model tool calls; one plan task is a
+        // batch of one, so the engine's per-task executor contract is unchanged.
+        execute: async input => {
+          const batch = await ctx.tools.execute({
+            calls: [{ type: 'tool-call', id: input.callId, name: input.name, arguments: JSON.stringify(input.arguments) }],
+            signal: input.signal,
+            ...(input.agent === undefined ? {} : { agent: input.agent }),
+          })
+          const settled = batch.results[0]?.result
+          return settled ?? {
+            isError: true,
+            error: { message: `${input.name} settled without a result` },
+            content: [{ type: 'text', text: `${input.name} settled without a result` }],
+          }
+        },
         ...(agent === undefined ? {} : { agent }),
         trace,
       }

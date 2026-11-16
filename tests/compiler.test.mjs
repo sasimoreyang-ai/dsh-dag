@@ -4,6 +4,7 @@ import test from 'node:test'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import Tools from '@deepseek-ai/dsh-tools'
+import { loadExecutor } from './fixtures/executor.mjs'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as compiler from '../lib/compiler/index.js'
 import {
@@ -142,6 +143,7 @@ async function harness(t, { respond, config = {} }) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
+  loadExecutor(ctx)
   await ctx.plugin(LlmFixture, respond)
   await ctx.plugin(compiler, { provider: 'fixture', model: 'fixture', trace: false, ...config })
   t.after(() => ctx.fiber.dispose())

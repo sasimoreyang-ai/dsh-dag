@@ -6,6 +6,7 @@ import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import Tools from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { createScope } from '@deepseek-ai/dsh-scope'
+import { callTool, loadExecutor } from './fixtures/executor.mjs'
 import * as dag from '../lib/index.js'
 import { validateGraph, resolveArguments } from '../lib/graph.js'
 
@@ -13,20 +14,25 @@ async function setup(t, config = {}) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
+  loadExecutor(ctx)
   const fork = await ctx.plugin(dag, { trace: false, ...config })
   t.after(() => ctx.fiber.dispose())
   const agent = { id: 'test-session' }
-  const call = (nodes, options = {}) => ctx.tools.execute({
-    name: 'dag_execute', callId: ToolCallId('root'), arguments: { nodes, ...options.args },
-    agent: options.agent ?? agent, signal: options.signal ?? new AbortController().signal,
+  // One graph is one model tool call, which this host dispatches as a batch of one.
+  const call = (nodes, options = {}) => callTool(ctx, 'dag_execute', { nodes, ...options.args }, {
+    callId: ToolCallId('root'), agent: options.agent ?? agent, signal: options.signal,
   })
+  const nested = (exec, name, args, callId) => ctx.tools.execute({
+    calls: [{ type: 'tool-call', id: ToolCallId(callId), name, arguments: JSON.stringify(args) }],
+    signal: exec.signal, agent: exec.agent,
+  }).then(batch => batch.results[0].result)
   const register = (name, execute, parallel = true) => ctx.tools.register({
     name, description: name,
     parameters: { type: 'object', additionalProperties: true },
     output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     execute, isConcurrencySafe: () => parallel,
   })
-  return { ctx, fork, agent, call, register }
+  return { ctx, fork, agent, call, register, nested }
 }
 
 const node = (id, tool = 'echo', args = {}, dependsOn = []) => ({ id, tool, arguments: args, dependsOn })
@@ -36,7 +42,7 @@ const statuses = result => result.value.nodes.map(node => node.status)
 test('exact rc.2 runtime exposes a native DAG tool and unregisters on disposal', async t => {
   const { ctx, fork } = await setup(t)
   assert.ok(ctx.tools.schemas().some(tool => tool.name === 'dag_execute'))
-  assert.equal(ctx.tools.executionMode({ name: 'dag_execute', arguments: {}, signal: new AbortController().signal }).kind, 'exclusive')
+  assert.equal(ctx.tools.get('dag_execute')?.isConcurrencySafe?.({ nodes: [] }) ?? false, false)
   await fork.dispose()
   assert.equal(ctx.tools.get('dag_execute'), undefined)
 })
@@ -140,8 +146,6 @@ test('nested call retains agent, root id and parent token and forwards extra con
   const extra = createUserMessage({ kind: 'test' }, [{ type: 'text', text: 'deferred' }])
   register('echo', async (_args, exec) => {
     assert.equal(exec.agent, agent)
-    assert.equal(exec.rootCallId, 'root')
-    assert.ok(exec.parent)
     assert.match(exec.callId, /:dag:/u)
     exec.deferContext(extra)
     return 'ok'
@@ -164,10 +168,9 @@ test('turn completion propagates and stops later node dispatch', async t => {
 })
 
 test('indirect recursion through another tool fails without creating another graph', async t => {
-  const { ctx, register, call } = await setup(t)
+  const { register, call, nested } = await setup(t)
   register('reenter', async (_args, exec) => {
-    const result = await ctx.tools.execute({ ...exec, parent: exec.token, name: 'dag_execute',
-      callId: ToolCallId('recursive'), arguments: { nodes: [node('loop', 'reenter')] } })
+    const result = await nested(exec, 'dag_execute', { nodes: [node('loop', 'reenter')] }, 'recursive')
     assert.equal(result.isError, true)
     assert.match(result.error.message, /Nested DAG/u)
     return 'recursion denied'

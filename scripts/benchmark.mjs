@@ -4,6 +4,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import Tools from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import { callTool, loadExecutor } from '../tests/fixtures/executor.mjs'
 import * as dag from '../lib/index.js'
 
 // Controlled scheduler benchmark. Each branch has two sequential 50 ms tools.
@@ -13,6 +14,7 @@ async function measure(concurrency) {
   try {
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
+    loadExecutor(ctx)
     await ctx.plugin(dag, { maxConcurrency: concurrency, trace: false })
     ctx.tools.register({ name: 'wait_fixture', description: '', parameters: { type: 'object' },
       output: { schema: {}, render: () => [] }, isConcurrencySafe: () => true,
@@ -23,8 +25,8 @@ async function measure(concurrency) {
       nodes.push({ id: `b${branch}`, tool: 'wait_fixture', arguments: {}, dependsOn: [`a${branch}`] })
     }
     const start = performance.now()
-    const result = await ctx.tools.execute({ name: 'dag_execute', callId: ToolCallId('bench'),
-      agent: { id: 'benchmark' }, arguments: { nodes }, signal: new AbortController().signal })
+    const result = await callTool(ctx, 'dag_execute', { nodes },
+      { callId: ToolCallId('bench'), agent: { id: 'benchmark' } })
     if (result.isError || result.value.status !== 'succeeded') throw new Error(JSON.stringify(result))
     return Math.round(performance.now() - start)
   } finally { await ctx.fiber.dispose() }

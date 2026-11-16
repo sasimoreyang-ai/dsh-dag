@@ -34,10 +34,12 @@ export function apply(ctx: Context, config: Config): void {
     if (!exec.agent) throw new Error('dag_execute requires a calling DSH agent.')
     const nodes = validateGraph(nodesInput, config.maxNodes, config.maxInputChars)
     // Check all visible definitions and literal arguments before the first dispatch.
+    const safe = new Map<string, (args: unknown) => boolean>()
     for (const node of nodes) {
       if (node.tool === 'dag_execute') throw new Error('Nested DAG execution is disabled.')
       const definition = ctx.tools.get(node.tool, exec.agent)
       if (!definition) throw new Error(`Tool ${node.tool} is unavailable to this agent.`)
+      safe.set(node.id, args => definition.isConcurrencySafe?.(args) === true)
       let hasReferences = false
       mapArguments(node.arguments, () => { hasReferences = true; return null })
       if (!hasReferences) {
@@ -52,15 +54,13 @@ export function apply(ctx: Context, config: Config): void {
     const timer = setTimeout(() => deadline.abort(new Error('DAG deadline exceeded.')), config.timeoutMs)
     timer.unref()
     const signal = AbortSignal.any([exec.signal, shutdown.signal, deadline.signal])
-    const correlation = { runId, sessionId: exec.agent.id, rootCallId: exec.rootCallId, callId: exec.callId }
-    const input = (node: DagNode, args: Record<string, Json>) => ({
-      callId: ToolCallId(`${exec.callId}:dag:${runId}:${node.id}`),
-      rootCallId: exec.rootCallId,
-      parent: exec.token,
-      agent: exec.agent,
-      name: node.tool,
-      arguments: args,
+    const correlation = { runId, sessionId: exec.agent.id, callId: exec.callId }
+    const callIdOf = (node: DagNode) => ToolCallId(`${exec.callId}:dag:${runId}:${node.id}`)
+    // This host dispatches a batch of model tool calls; one graph node is a batch of one.
+    const dispatch = (node: DagNode, args: Record<string, Json>) => ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: callIdOf(node), name: node.tool, arguments: JSON.stringify(args) }],
       signal,
+      agent: exec.agent,
     })
     trace({ ...correlation, event: 'run-start', nodeCount: nodes.length, maxConcurrency: config.maxConcurrency })
     try {
@@ -69,11 +69,13 @@ export function apply(ctx: Context, config: Config): void {
         concurrency: config.maxConcurrency,
         failurePolicy,
         maxNodeOutputChars: config.maxNodeOutputChars,
-        parallel: (node, args) => ctx.tools.executionMode(input(node, args)).kind === 'parallel',
+        parallel: (node, args) => safe.get(node.id)?.(args) ?? false,
         async execute(node, args) {
-          const result = await ctx.tools.execute(input(node, args))
-          for (const context of result.additionalContexts ?? []) exec.deferContext(context)
-          if (result.concludesTurn) exec.concludeTurn()
+          const batch = await dispatch(node, args)
+          for (const context of batch.additionalContexts) exec.deferContext(context)
+          if (batch.concluded) exec.concludeTurn()
+          const result = batch.results[0]?.result
+          if (result === undefined) return { ok: false, cancelled: signal.aborted, output: '[]', error: 'NO_RESULT' }
           // Preserve the policy-processed model projection in the returned report.
           // Canonical values remain private to dependency resolution, as in DSH's PTC transport.
           if (result.isError) return {
@@ -83,11 +85,11 @@ export function apply(ctx: Context, config: Config): void {
             // Raw failures can contain details omitted by DSH's model projection.
             error: result.error.info?.code ?? 'TOOL_FAILED',
           }
-          return { ok: true, value: result.value, output: JSON.stringify(result.content), concludesTurn: result.concludesTurn }
+          return { ok: true, value: result.value as Json, output: JSON.stringify(result.content), concludesTurn: result.concludesTurn === true }
         },
         trace(event: string, node: DagNode, result?: NodeResult) {
           trace({ ...correlation, event, nodeId: node.id, tool: node.tool,
-            subCallId: input(node, {}).callId,
+            subCallId: callIdOf(node),
             ...(result ? { status: result.status, durationMs: result.durationMs } : {}) })
         },
       })

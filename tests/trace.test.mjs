@@ -4,6 +4,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import Tools from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import { callTool, loadExecutor } from './fixtures/executor.mjs'
 import * as dag from '../lib/index.js'
 
 test('trace correlates each dispatch and terminal status without recording argument payloads', async t => {
@@ -16,12 +17,13 @@ test('trace correlates each dispatch and terminal status without recording argum
   } })
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
+  loadExecutor(ctx)
   await ctx.plugin(dag)
   ctx.tools.register({ name: 'fixture', description: '', parameters: { type: 'object' },
     output: { schema: {}, render: () => [] }, execute: async () => 'SECRET-RESULT' })
-  const result = await ctx.tools.execute({ name: 'dag_execute', callId: ToolCallId('trace-root'),
-    agent: { id: 'session-1' }, signal: new AbortController().signal,
-    arguments: { nodes: [{ id: 'one', tool: 'fixture', arguments: { secret: 'SECRET-INPUT' } }] } })
+  const result = await callTool(ctx, 'dag_execute',
+    { nodes: [{ id: 'one', tool: 'fixture', arguments: { secret: 'SECRET-INPUT' } }] },
+    { callId: ToolCallId('trace-root'), agent: { id: 'session-1' } })
   assert.equal(result.isError, false)
   assert.deepEqual(records.map(row => row.event), ['run-start', 'node-start', 'node-end', 'run-end'])
   assert.ok(records.every(row => row.runId === result.value.runId && row.sessionId === 'session-1'))
