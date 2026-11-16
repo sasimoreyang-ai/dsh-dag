@@ -202,7 +202,12 @@ Trace 只记调度元数据，不记工具参数与内容（有测试断言）�
 ```sh
 npm run check      # build + 31 项测试 + pack dry-run
 npm run benchmark  # 8 个 50ms 工具、四条两段分支，串行 vs 并发 4
+
+# 与参考实现对拍（不 vendor 参考代码，按路径传入）
+node scripts/parity.mjs /path/to/notes/src/bench-parallelqa-dag/dsh-demo/engine.mjs
 ```
+
+`scripts/parity.mjs` 把参考实现自己的导出函数与本移植并排跑同一批输入并逐项断言深相等：`parseArgs`（23 例，含未闭合引号/方括号、裸标识符、数字、嵌套数组）、`dependenciesOf`（7 例）、`substitute` / `stringifyArgs`（7 例）、`parsePlan`（7 例）、`scheduleWaves`（7 例）、`parseJoinerOutput`（11 例），以及三段 prompt 的字节相等。当前结果 **72/72 identical**（两个分支相同：引擎代码在本分支除派发适配外未改动）。
 
 当前结果：`npm test` 31/31 通过；benchmark 串行约 488 ms、`maxConcurrency=4` 约 118 ms。测试直接加载已发布 DSH 的 ToolRuntime，覆盖依赖引用、滚动调度、独占屏障、并发上限、权限拒绝、审批渠道缺失、作用域限制、上下文传递、回合结束、递归防护、取消收敛、卸载、trace；编译器侧覆盖 prompt 哈希、解析/调度/替换/joiner 单元、以及一次走真实工具注册表的端到端编译（含重规划与空计划）。
 
