@@ -1,3 +1,18 @@
+# DSH plugin bundle for @sasimoreyang-ai/dsh-dag.
+#
+# Two entries, no DSH source changes:
+#   tool-dag      dag_execute: the model submits a graph as one tool call
+#   dag-compiler  LLMCompiler as the agent: intercepts the loop's model call
+#                 through the public `llm/stream` waterfall
+#
+# The compiler arm is registered disabled: it replaces every turn's model call
+# and needs a provider/model route. Enable it in your profile patch with
+#   - id: dag-compiler
+#     disabled: false
+#     config: { provider: ..., model: ... }
 - insert:
     - id: tool-dag
       name: '@sasimoreyang-ai/dsh-dag'
+    - id: dag-compiler
+      name: '@sasimoreyang-ai/dsh-dag/compiler'
+      disabled: true

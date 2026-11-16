@@ -117,7 +117,12 @@ function resolveAgent(ctx: Context, sessionId: GenerateOptions['sessionId']): Ag
  */
 export function apply(ctx: Context, config: CompilerConfig): void {
   const shutdown = new AbortController()
-  ctx.effect(() => () => { shutdown.abort(new Error('DAG compiler plugin disposed.')) }, 'dag-compiler: cancel in-flight compilations')
+  // Every compilation in flight, so unloading drains instead of abandoning work.
+  const active = new Set<Promise<unknown>>()
+  ctx.effect(() => async () => {
+    shutdown.abort(new Error('DAG compiler plugin disposed.'))
+    await Promise.allSettled(active)
+  }, 'dag-compiler: cancel and drain in-flight compilations')
 
   const trace = (event: string, data: Record<string, unknown>): void => {
     if (!config.trace) return
@@ -142,7 +147,10 @@ export function apply(ctx: Context, config: CompilerConfig): void {
     if (question === undefined) return next()
 
     return (async function* compile(): AsyncGenerator<StreamChunk> {
-      const signal = options.signal ?? new AbortController().signal
+      // Fuse the caller's cancellation with this plugin's own teardown.
+      const signal = options.signal === undefined
+        ? shutdown.signal
+        : AbortSignal.any([options.signal, shutdown.signal])
       const agent = resolveAgent(ctx, options.sessionId)
       const deps: CompilerDeps = {
         stream: call => ctx.llm.stream(call),
@@ -165,13 +173,17 @@ export function apply(ctx: Context, config: CompilerConfig): void {
         trace,
       }
       let metrics: CompilerMetrics
+      const run = compiling.run(true, () => runCompiler(deps, config, question, signal))
+      active.add(run)
       try {
-        metrics = await compiling.run(true, () => runCompiler(deps, config, question, signal))
+        metrics = await run
       } catch (error) {
         // Surface the failure as a failed model call instead of failing the turn
         // mutely: this host has no successful finish reason for it.
         trace('compile-error', { message: error instanceof Error ? error.message : String(error) })
         throw error
+      } finally {
+        active.delete(run)
       }
       const answer = metrics.answer !== '' ? metrics.answer : metrics.answerTolerant
       trace('compile-end', {
@@ -179,6 +191,38 @@ export function apply(ctx: Context, config: CompilerConfig): void {
         replans: metrics.replans, llmCalls: metrics.llmCalls,
         plannerMs: metrics.plannerMs, executeMs: metrics.executeMs, joinerMs: metrics.joinerMs,
       })
+      // A compiled turn that produced no answer must not become an empty
+      // assistant message: a headless run would print nothing and report
+      // success. Fail loudly, or say what happened.
+      if (answer === '') {
+        trace('compile-empty-answer', {
+          tasks: metrics.planTasks, llmCalls: metrics.llmCalls, replans: metrics.replans,
+          joinerChars: metrics.joinerRaw.length,
+        })
+        if (config.emptyAnswer === 'error') {
+          yield {
+            type: 'finish',
+            reason: {
+              kind: 'error',
+              failure: { message: 'dag-compiler produced no answer', code: 'DAG_COMPILER_EMPTY_ANSWER' },
+            },
+          }
+          return
+        }
+        const raw = metrics.joinerRaw.trim().replace(/\s+/gu, ' ')
+        const detail = raw === '' ? 'joiner returned nothing' : `joiner said: ${raw.slice(0, 300)}`
+        yield { type: 'text-delta', index: 0, text: `dag-compiler produced no answer (${metrics.planTasks} plan tasks, ${metrics.llmCalls} model calls); ${detail}` }
+        yield {
+          type: 'usage',
+          usage: {
+            inputTokens: metrics.inputTokens,
+            outputTokens: metrics.outputTokens,
+            ...(metrics.totalTokens > 0 ? { totalTokens: metrics.totalTokens } : {}),
+          },
+        }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
       // The virtual assistant message, exactly the reference demo's sequence:
       // answer text, the engine's own planner+joiner usage (tool-internal usage
       // is reported by the tool plugins' own sinks), and a clean stop. This host

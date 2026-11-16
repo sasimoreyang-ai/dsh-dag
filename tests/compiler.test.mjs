@@ -111,6 +111,11 @@ test('positional arguments map onto registry arguments like the reference engine
   assert.deepEqual(buildArguments(math, ['half of it']), { problem: 'half of it' })
   assert.deepEqual(buildArguments(math, ['diff', ['AAA', 'BBB']]), { problem: 'diff', context: ['AAA', 'BBB'] })
   assert.deepEqual(buildArguments(math, [7]), { problem: '7' })
+  // An undescribed tool still gets the reference unconditional shape, so the
+  // call reaches the registry and fails there instead of being skipped here.
+  assert.deepEqual(buildArguments(undefined, ['A'], 'lookup'), { problem: 'A' })
+  assert.deepEqual(buildArguments(undefined, ['A'], 'search'), { entity: 'A' })
+  assert.deepEqual(buildArguments(undefined, ['A', ['X']], 'lookup'), { problem: 'A', context: ['X'] })
 })
 
 test('observations prefer canonical string values and mark errors', () => {
@@ -263,12 +268,14 @@ test('an empty plan still asks the joiner, as upstream does', async t => {
 test('configuration bounds and defaults match the reference run', () => {
   const base = compiler.Config({ provider: 'p', model: 'm' })
   assert.equal(base.maxReplans, 1)
-  assert.equal(base.maxParallel, 8)
-  assert.equal(base.detect, 'either')
+  assert.equal(base.maxParallel, 0)          // 0 = send the whole wave at once, as the reference does
+  assert.equal(base.maxToolOutputChars, 0)   // 0 = never truncate, as the reference does
+  assert.equal(base.detect, 'heuristic')     // the reference demo's structural discriminator
   assert.equal(base.tools.length, 2)
-  assert.equal(base.maxTokens, 4096)
-  assert.throws(() => compiler.Config({}))
-  assert.throws(() => compiler.Config({ provider: 'p', model: 'm', maxParallel: 0 }))
+  assert.equal(base.maxTokens, 2048)         // the reference engine own default
+  assert.throws(() => compiler.Config({}))   // route is required
+  assert.throws(() => compiler.Config({ provider: 'p', model: 'm', maxParallel: 65 }))
+  assert.throws(() => compiler.Config({ provider: 'p', model: 'm', maxParallel: -1 }))
   assert.equal(typeof compiler.name, 'string')
 })
 
@@ -277,4 +284,68 @@ test('marked loop requests are recognised through the harness marker', () => {
   assert.equal(isAgentLoopRequest({ provider: 'p', model: 'm', messages: [] }), false)
   assert.equal(compiler.isLoopRequestByHeuristic(loopRequest('q')), true)
   assert.equal(compiler.questionOf(loopRequest('the question')), 'the question')
+})
+test('the default discriminator compiles an unmarked loop-shaped request', async t => {
+  const { ctx, register } = await harness(t, {
+    respond: (options, index) => index === 1
+      ? text('1. search("A")\nThought: ok.\n2. join()<END_OF_PLAN>')
+      : text('Action: Finish(9)'),
+  })
+  register('search', async () => 'page')
+  // Not marked by the loop: only the reference demo's structural heuristic
+  // identifies it, which is the default discriminator.
+  const request = {
+    provider: 'fixture', model: 'fixture',
+    messages: [
+      { role: 'system', content: [{ type: 'text', text: 'system prompt' }] },
+      { role: 'user', content: [{ type: 'text', text: 'q' }], source: { kind: 'user' } },
+    ],
+  }
+  const chunks = []
+  for await (const chunk of ctx.waterfall('llm/stream', request, () => { throw new Error('adapter must not be reached') })) chunks.push(chunk)
+  assert.equal(chunks[0].text, '9')
+})
+
+test('a compiled turn with no answer says so instead of sending an empty message', async t => {
+  const { ctx, register } = await harness(t, {
+    respond: (options, index) => index === 1
+      ? text('1. search("A")\n2. join()<END_OF_PLAN>')
+      : text(''),
+  })
+  register('search', async () => 'page')
+  const chunks = []
+  for await (const chunk of ctx.waterfall('llm/stream', loopRequest('q'), () => { throw new Error('adapter') })) chunks.push(chunk)
+  const said = chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join('')
+  assert.notEqual(said, '')
+  assert.match(said, /no answer/u)
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+})
+
+test('emptyAnswer: error fails the call rather than inventing an answer', async t => {
+  const { ctx, register } = await harness(t, {
+    respond: (options, index) => index === 1
+      ? text('1. search("A")\n2. join()<END_OF_PLAN>')
+      : text(''),
+    config: { emptyAnswer: 'error' },
+  })
+  register('search', async () => 'page')
+  const chunks = []
+  for await (const chunk of ctx.waterfall('llm/stream', loopRequest('q'), () => { throw new Error('adapter') })) chunks.push(chunk)
+  assert.deepEqual(chunks.map(chunk => chunk.type), ['finish'])
+  assert.equal(chunks[0].reason.kind, 'error')
+  assert.equal(chunks[0].reason.failure.code, 'DAG_COMPILER_EMPTY_ANSWER')
+})
+
+test('the configured reasoning effort reaches both planner and joiner calls', async t => {
+  const { ctx, llm, register } = await harness(t, {
+    respond: (options, index) => index === 1
+      ? text('1. search("A")\n2. join()<END_OF_PLAN>')
+      : text('Action: Finish(1)'),
+    config: { reasoningEffort: 'off' },
+  })
+  register('search', async () => 'page')
+  const chunks = []
+  for await (const chunk of ctx.waterfall('llm/stream', loopRequest('q'), () => { throw new Error('adapter') })) chunks.push(chunk)
+  assert.ok(llm.calls.length >= 2)
+  assert.ok(llm.calls.every(call => call.reasoningEffort === 'off'))
 })

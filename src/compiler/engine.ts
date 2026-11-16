@@ -64,10 +64,15 @@ export interface CompilerSettings {
   model: string
   reasoningEffort?: string
   temperature: number
-  maxTokens: number
-  maxReplans: number
-  maxParallel: number
-  maxToolOutputChars: number
+  maxTokens?: number
+  maxReplans?: number
+  /**
+   * Cap on concurrent dispatches inside one ready wave. Absent or 0 means the
+   * whole wave goes out at once, which is what the reference engine does.
+   */
+  maxParallel?: number
+  /** Observation cap; absent or 0 keeps the full observation, as the reference does. */
+  maxToolOutputChars?: number
   tools: CompilerToolConfig[]
   plannerPrompt?: string
   joinerPrompt?: string
@@ -84,7 +89,7 @@ export interface ExecutedTask {
   deps: number[]
   ms: number
   observation: string
-  truncated: boolean
+  thought: string
 }
 
 /** Measurements for one compiled turn. */
@@ -144,8 +149,8 @@ export async function callModel(
     ...(settings.reasoningEffort === undefined
       ? {}
       : { reasoningEffort: settings.reasoningEffort as NonNullable<GenerateOptions['reasoningEffort']> }),
-    temperature: settings.temperature,
-    maxTokens: settings.maxTokens,
+    temperature: settings.temperature ?? 0,
+    maxTokens: settings.maxTokens ?? 2048,
     signal: options.signal,
   })
   for await (const chunk of chunks) {
@@ -157,9 +162,10 @@ export async function callModel(
     } else if (chunk.type === 'finish') reason = chunk.reason
   }
   if (reason !== undefined && reason.kind !== 'stop' && reason.kind !== 'max-tokens' && reason.kind !== 'tool-calls') {
-    // This host reports transport failures by throwing from the stream; a
-    // non-terminal finish reason is the remaining failure signal.
-    throw new CompilerLlmError(`model call finished with ${reason.kind}`, String(reason.kind).toUpperCase())
+    // The reference engine reads `reason.failure` here; this host's aborted and
+    // error reasons carry it, so keep the reference's fallback wording when a
+    // reason has none.
+    throw new CompilerLlmError('model call failed', 'LLM_FAILURE')
   }
   return { text, ms: Date.now() - started, inputTokens, outputTokens, totalTokens, stopReason: reason?.kind }
 }
@@ -179,18 +185,40 @@ export function observationOf(result: ToolExecutionResult): string {
 }
 
 /**
+ * The reference engine's unconditional argument rule: `search` takes an entity,
+ * everything else takes a problem plus an optional context list. Used when a
+ * plan names a tool the configuration does not describe, so an unknown or
+ * hallucinated action still reaches the registry and fails there — exactly what
+ * the reference does.
+ * @param tool - the tool name the plan used.
+ * @param args - substituted positional arguments.
+ * @returns the registry arguments.
+ */
+export function referenceArguments(tool: string, args: readonly PlanArgument[]): Record<string, unknown> {
+  if (tool === 'search') return { entity: String(args[0] ?? '') }
+  return Array.isArray(args[1])
+    ? { problem: String(args[0] ?? ''), context: args[1].map(String) }
+    : { problem: String(args[0] ?? '') }
+}
+
+/**
  * Map positional planner arguments onto one tool's JSON arguments.
  *
  * The reference engine hardcoded `search`/`math`; this generalizes it while
  * staying byte-compatible for the default vocabulary: declared parameters fill
  * in order, surplus arguments are dropped, absent ones are omitted (an explicit
  * `context: undefined` is rejected by the registry), and scalars are coerced to
- * text as the reference did.
- * @param spec - the tool's planner signature.
+ * text as the reference did. A tool the configuration does not describe falls
+ * back to {@link referenceArguments}.
+ * @param spec - the tool's planner signature, when configured.
  * @param args - substituted positional arguments.
+ * @param tool - the plan's tool name, for the fallback rule.
  * @returns the registry arguments.
  */
-export function buildArguments(spec: ToolSpec, args: readonly PlanArgument[]): Record<string, unknown> {
+export function buildArguments(
+  spec: ToolSpec | undefined, args: readonly PlanArgument[], tool?: string,
+): Record<string, unknown> {
+  if (spec === undefined) return referenceArguments(tool ?? '', args)
   const out: Record<string, unknown> = {}
   const coerce = spec.coerce ?? 'string'
   spec.parameters.forEach((name, index) => {
@@ -219,7 +247,11 @@ export async function runCompiler(
   const specs = toolSpecsOf(settings.tools)
   const byName = new Map(specs.map(spec => [spec.name, spec]))
   const joinerPrompt = settings.joinerPrompt ?? JOINER_PROMPT
-  const rounds = settings.maxReplans + 1
+  // Defaults mirror the reference engine's own fallbacks.
+  const maxReplans = settings.maxReplans ?? 1
+  const rounds = maxReplans + 1
+  const parallelCap = settings.maxParallel ?? 0
+  const observationCap = settings.maxToolOutputChars ?? 0
 
   const metrics: CompilerMetrics = {
     plannerMs: 0, executeMs: 0, joinerMs: 0,
@@ -293,53 +325,47 @@ export async function runCompiler(
     })
 
     const observations = new Map<number, string>()
+    // Completion order, not plan order: the reference pushes inside the
+    // concurrent map, so the joiner's scratchpad and the report follow whichever
+    // task settled first.
     const perTask: ExecutedTask[] = []
-    const order = (id: number): number => executable.findIndex(task => task.id === id)
     const started = Date.now()
     for (const wave of scheduleWaves(executable)) {
       metrics.planWaves += 1
       metrics.maxWidth = Math.max(metrics.maxWidth, wave.length)
       deps.trace?.('wave', { round, width: wave.length, tasks: wave.map(task => task.id) })
-      for (let offset = 0; offset < wave.length; offset += settings.maxParallel) {
-        await Promise.all(wave.slice(offset, offset + settings.maxParallel).map(async task => {
-          const args = substitute(task.args, observations)
-          const taskStart = Date.now()
-          const spec = byName.get(task.tool)
-          let observation: string
-          if (spec === undefined) {
-            observation = `Error: unknown plan action ${task.tool}`
-          } else {
-            try {
-              const result = await deps.execute({
-                callId: `${settings.callIdPrefix}-${round}-${task.id}` as ToolCallId,
-                name: task.tool,
-                arguments: buildArguments(spec, args),
-                signal,
-                ...(deps.agent === undefined ? {} : { agent: deps.agent }),
-              })
-              observation = observationOf(result)
-            } catch (error) {
-              observation = `Error: ${error instanceof Error ? error.message : String(error)}`
-            }
-          }
-          const truncated = observation.length > settings.maxToolOutputChars
-          const stored = truncated ? observation.slice(0, settings.maxToolOutputChars) : observation
-          observations.set(task.id, stored)
-          perTask.push({
-            id: task.id, tool: task.tool, args: task.args, resolvedArgs: args, deps: task.deps,
-            ms: Date.now() - taskStart, observation: stored, truncated,
-          })
-          deps.trace?.('task-end', { round, id: task.id, tool: task.tool, ms: Date.now() - taskStart, truncated })
-        }))
+      const dispatch = async (task: PlanTask): Promise<void> => {
+        const args = substitute(task.args, observations)
+        const taskStart = Date.now()
+        const result = await deps.execute({
+          callId: `${settings.callIdPrefix}-${round}-${task.id}` as ToolCallId,
+          name: task.tool,
+          arguments: buildArguments(byName.get(task.tool), args, task.tool),
+          signal,
+          ...(deps.agent === undefined ? {} : { agent: deps.agent }),
+        })
+        const observation = observationOf(result)
+        const stored = observationCap > 0 && observation.length > observationCap
+          ? observation.slice(0, observationCap)
+          : observation
+        observations.set(task.id, stored)
+        perTask.push({
+          id: task.id, tool: task.tool, args: task.args, resolvedArgs: args, deps: task.deps,
+          ms: Date.now() - taskStart, observation: stored, thought: task.thought,
+        })
+        deps.trace?.('task-end', { round, id: task.id, tool: task.tool, ms: Date.now() - taskStart })
+      }
+      // The reference sends the whole wave at once; a positive cap only narrows
+      // that window without changing the result order.
+      for (let offset = 0; offset < wave.length; offset += parallelCap > 0 ? parallelCap : wave.length) {
+        await Promise.all(wave.slice(offset, offset + (parallelCap > 0 ? parallelCap : wave.length)).map(dispatch))
       }
     }
     metrics.executeMs += Date.now() - started
-    // Plan order, not completion order: the scratchpad and the report follow the plan.
-    perTask.sort((left, right) => order(left.id) - order(right.id))
     metrics.tasks = perTask
 
     const scratchpad = perTask
-      .map(task => `Thought: ${executable[order(task.id)].thought}\n${task.tool}(${stringifyArgs(task.resolvedArgs)})\nObservation: ${task.observation}\n`)
+      .map(task => `Thought: ${task.thought}\n${task.tool}(${stringifyArgs(task.resolvedArgs)})\nObservation: ${task.observation}\n`)
       .join('')
     await joinRound(scratchpad)
     if (!lastJoin.isReplan) break
@@ -348,8 +374,7 @@ export async function runCompiler(
   }
 
   if (settings.metricsPath !== undefined) {
-    try { appendFileSync(settings.metricsPath, `${JSON.stringify({ question, ...metrics })}\n`) }
-    catch { /* Metrics must never fail a compiled turn. */ }
+    appendFileSync(settings.metricsPath, `${JSON.stringify({ question, ...metrics })}\n`)
   }
   return metrics
 }

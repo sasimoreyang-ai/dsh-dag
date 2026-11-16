@@ -148,13 +148,14 @@ llm/stream waterfall
 | `provider` / `model` | 必填 | planner 与 joiner 的路由；外层 loop 的路由由 DSH 自己决定 |
 | `reasoningEffort` | 不传 | 传给 planner/joiner 的推理档位。不传时按适配器默认（DeepSeek 方言下等于关闭思考，与参考实现一致） |
 | `temperature` | `0` | 采样温度 |
-| `maxTokens` | `4096` | planner/joiner 单次上限 |
+| `maxTokens` | `2048` | planner/joiner 单次上限（参考实现的代码默认值；其 ParallelQA overlay 用 4096） |
 | `maxReplans` | `1` | 重规划轮数；总计划轮数为 `maxReplans + 1` |
-| `maxParallel` | `8` | 单个 ready 波内并发派发的任务数 |
-| `maxToolOutputChars` | `8000` | 喂给 joiner 与下一轮计划的观测长度上限，超出截断 |
+| `maxParallel` | `0` | 单个 ready 波内并发上限；`0` = 整波一次发出（参考实现的做法） |
+| `maxToolOutputChars` | `0` | 喂给 joiner 与下一轮计划的观测长度上限；`0` = 不截断（参考实现的做法） |
 | `tools` | ParallelQA 的 `search` / `math` | planner 可见的工具词汇（名字、描述块、位置参数名） |
 | `plannerPrompt` / `joinerPrompt` | 内置 | 覆盖内置 prompt（默认值见下） |
-| `detect` | `either` | 接管判据：`marker`=只认 loop 官方标记；`heuristic`=参考实现的结构启发式；`either`=两者取或 |
+| `detect` | `heuristic` | 接管判据：`heuristic`=参考实现的结构启发式（默认）；`marker`=只认 loop 官方标记；`either`=两者取或 |
+| `emptyAnswer` | `diagnostic` | 编译没产出答案时怎么办：`diagnostic` 在 assistant 文本里说明；`error` 以 `DAG_COMPILER_EMPTY_ANSWER` 失败 |
 | `metricsPath` | 不设置 | 可选 JSONL，逐轮落一条引擎记录 |
 | `callIdPrefix` | `dag` | 派发时构造 call id 的前缀 |
 | `trace` | `true` | 向 host 日志输出 `dag.compiler.trace` 结构化记录 |
@@ -174,12 +175,30 @@ llm/stream waterfall
 
 | 项 | 参考实现 | 本实现 | 原因 |
 | --- | --- | --- | --- |
-| loop 请求判据 | 结构启发式（无 `system` + 首条 system 消息 + 有 user） | 默认 `either`：优先 `isAgentLoopRequest` 官方标记，启发式兜底 | 该宿主版本已导出标记（WeakSet），比启发式更准；`detect: heuristic` 可复现原行为 |
-| `maxParallel` | 声明了但未使用，整波一起发 | 真正限制波内并发 | 参考实现的默认值 8 大于 ParallelQA 的实际波宽（≤5），默认配置下行为等价 |
-| 观测长度 | 不截断 | `maxToolOutputChars` 截断 | 通用工具输出可能远大于 ParallelQA 的段落，防止 joiner 上下文爆掉 |
-| 工具词汇 | 硬编码 `search` / `math` | `tools` 配置，默认值等于参考实现 | 让插件能用于别的工具集，同时默认保持可比 |
-| agent 归属 | 不传 | 用请求的 `sessionId` 从 live registry 解析出 Agent 并随派发传入 | 让按 agent 作用域可见的工具也能被图调用、并继承权限 |
-| 失败传播 | 抛错 | 抛错 | 两个版本都没有可用的「编译失败」终态，抛出让 loop 按模型失败处理 |
+| 工具词汇 | 硬编码 `search` / `math` | `tools` 配置，默认值逐字等于参考实现；未在配置里描述的工具名仍按参考实现的规则构造参数（`search` → `{entity}`，其余 → `{problem, context?}`）并**照常派发**，由注册表拒绝 | 让插件能用于别的工具集，同时保持默认可比、未知工具行为一致 |
+| 计划外增补 | — | `plannerPrompt` / `joinerPrompt` 可覆盖；`emptyAnswer` 在编译无答案时给诊断或失败 | 纯插件边界行为，引擎与 prompt 默认值不受影响 |
+| agent 归属 | 不传 | 用请求的 `sessionId` 从 live registry 解析出 Agent 并随派发传入 | 宿主必需：不传则按 agent 作用域可见的工具无法被图调用 |
+
+### 无头运行（headless）
+
+`dsh --profile headless "<task>"` 会把**这一轮的 assistant 文本**写到 stdout，所以编译器的产出必须是一段文本：
+
+- 正常路径：joiner 的 `Finish(answer)` 里的 answer 就是这轮的回答。
+- **无答案时不会再静默**：planner 没给出任务、joiner 也没给出 `Finish/Replan` 时，默认（`emptyAnswer: diagnostic`）会输出一段说明，例如
+  `dag-compiler produced no answer (0 plan tasks, 3 model calls); joiner said: ...`；
+  配 `emptyAnswer: error` 则以 `DAG_COMPILER_EMPTY_ANSWER` 失败。改成诊断而不是空字符串，是因为无头场景下空文本会被当成"成功但没内容"。
+- **thinking 模型要注意**：planner/joiner 若让模型把预算花在思考上、content 返回空，就会走到上面那条无答案路径。显式配 `reasoningEffort: 'off'`（或调大 `maxTokens`）可避免；参考实现在 DeepSeek 方言下正是靠适配器默认关思考才拿到干净 content。
+- **验证通道**：host logger 不一定会把 `dag.compiler.trace` 落到 stderr。要看"这一轮到底有没有被编译"，配 `metricsPath: /path/engine.jsonl`，引擎会逐轮追加一条记录（含 planner/joiner 耗时、任务数、波数、重规划次数、answer）。
+
+```yaml
+- id: dag-compiler
+  disabled: false
+  config:
+    provider: <route>
+    model: <model>
+    reasoningEffort: 'off'
+    metricsPath: /var/log/dsh/dag-compiler.jsonl
+```
 
 ### 已知边界
 
