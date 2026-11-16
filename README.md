@@ -15,9 +15,9 @@
 
 | 分支 | DSH 版本 | cordis | 说明 |
 | --- | --- | --- | --- |
-| `main` | `0.2.0-rc.2` | `~4.0.4` | 只有工具臂 |
-| `feat/llmcompiler-dag` | **`0.2.1-alpha.2`** | `~4.0.5-alpha.1` | 工具臂 + 编译器臂；对齐参考实现（LLMCompiler × ParallelQA）实际跑过的 DSH 版本 |
-| `feat/llmcompiler-dag-0.2.2-rc.1` | `0.2.2-rc.1` | `~4.1.0` | 同实现；因 `dsh-tools` 改成批量派发而做了适配 |
+| **`main`** | **`0.2.2-rc.1`** | `~4.1.0` | 主线：工具臂 + 编译器臂（因 `dsh-tools` 批量派发做了适配） |
+| `feat/llmcompiler-dag`（本分支） | `0.2.1-alpha.2` | `~4.0.5-alpha.1` | 同一套实现，对齐参考实现（LLMCompiler × ParallelQA）实际跑过的 DSH 版本 |
+| `dsh-0.2.0-rc.2`（归档） | `0.2.0-rc.2` | `~4.0.4` | 主线迁移前的状态，只有工具臂 |
 
 所有 DSH peer dependency 都锁在对应版本；`peerDependencies` 与 `devDependencies` 的版本必须同步改，否则 `npm install` 会因 peer 冲突失败。
 
@@ -26,7 +26,7 @@
 需要 Node.js 22+、npm 和对应版本的 DSH。
 
 ```sh
-git checkout feat/llmcompiler-dag        # 或 feat/llmcompiler-dag-0.2.2-rc.1
+git checkout feat/llmcompiler-dag        # 主线是 main（0.2.2-rc.1）；本分支对应 0.2.1-alpha.2
 npm ci
 npm test
 npm pack
