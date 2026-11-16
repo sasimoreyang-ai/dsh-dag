@@ -42,6 +42,7 @@
     "check": "npm test && npm pack --dry-run",
     "benchmark": "npm run build && node scripts/benchmark.mjs",
     "check:install": "node scripts/check-install.mjs",
+    "check:headless": "node scripts/e2e/headless-check.mjs",
     "prepack": "npm run build"
   },
   "peerDependencies": {

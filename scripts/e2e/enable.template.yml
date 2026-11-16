@@ -1,0 +1,61 @@
+- id: llm-pi-ai
+  config:
+    providers:
+      stub:
+        apiKeyEnv: STUB_API_KEY
+        displayName: Local stub model
+        api: openai-completions
+        baseURL: http://127.0.0.1:8799/v1
+        models:
+          - id: stub-model
+            name: stub-model
+            contextWindow: 32768
+            maxTokens: 4096
+            input:
+              - text
+
+- id: agent-default-model
+  config:
+    provider: stub
+    model: stub-model
+
+- id: dag-compiler
+  disabled: false
+  config:
+    provider: stub
+    model: stub-model
+    detect: heuristic
+    temperature: 0
+    maxTokens: 512
+    maxReplans: 0
+    callIdPrefix: dage2e
+    trace: true
+    metricsPath: __METRICS__
+    tools:
+      - name: read
+        description: |-
+          read(file_path: str) -> str:
+           - Reads a UTF-8 text file and returns its line-numbered content.
+        parameters:
+          - file_path
+    plannerPrompt: |-
+      Given a user query, create a plan to solve it with the utmost parallelizability. Each plan should comprise an action from the following 2 types:
+
+      1. read(file_path: str) -> str:
+       - Reads a UTF-8 text file and returns its line-numbered content.
+
+      2. join():
+       - Collects and combines results from prior actions.
+
+      Guidelines:
+       - Each action MUST have a unique ID, which is strictly increasing.
+       - Inputs for actions can either be constants or outputs from preceding actions; use $id for the latter.
+       - Always call join as the last action in the plan, then say '<END_OF_PLAN>'.
+       - Only use the provided action types.
+
+      Here is one example:
+
+      Question: What is inside /tmp/notes.txt?
+      1. read("/tmp/notes.txt")
+      Thought: I can answer the question now.
+      2. join()<END_OF_PLAN>

@@ -228,6 +228,21 @@ npm run benchmark  # 8 个 50ms 工具、四条两段分支，串行 vs 并发 4
 node scripts/parity.mjs /path/to/notes/src/bench-parallelqa-dag/dsh-demo/engine.mjs
 ```
 
+无头端到端（真跑 `dsh --profile headless`，用桩模型，不联网、不碰任何共享环境）：
+
+```sh
+# 一次性准备：在任意**临时目录**里装一份独立 dsh
+mkdir /tmp/dag-e2e && cd /tmp/dag-e2e
+npm i @deepseek-ai/dsh@0.2.2-rc.1 @deepseek-ai/dsh-base@0.2.2-rc.1 @deepseek-ai/dsh-headless@0.2.2-rc.1
+
+# 打插件包，然后在临时目录里跑检查（自带 DSH_HOME、自带 profile、自带桩模型）
+node /path/to/dsh-dag/scripts/e2e/headless-check.mjs /path/to/dsh-dag/sasimoreyang-ai-dsh-dag-*.tgz
+```
+
+它会：写一个 headless profile（bundle 里带本插件）→ 把打好的包装进该 profile → 起一个桩模型（planner 回 `read(...)` 计划、joiner 回 `Finish(<观测里的 token>)`）→ 跑 `dsh --profile headless --json` → 断言 9 项，包括"观测里确实带出了文件内容"和"引擎记录里 1 个任务 / 1 个波 / 2 次模型调用"。
+
+**当前结果：9/9 PASSED**，无头 stdout 输出 `TOKEN-LOCAL-7788`。因为 joiner 的答案是从观测里取出来的，所以跑通证明的是 **planner → 工具派发 → 观测 → joiner → assistant 文本**这条完整链路，而不是"进程退出码为 0"。
+
 `scripts/parity.mjs` 把参考实现自己的导出函数与本移植并排跑同一批输入并逐项断言深相等：`parseArgs`（23 例，含未闭合引号/方括号、裸标识符、数字、嵌套数组）、`dependenciesOf`（7 例）、`substitute` / `stringifyArgs`（7 例）、`parsePlan`（7 例）、`scheduleWaves`（7 例）、`parseJoinerOutput`（11 例），以及三段 prompt 的字节相等。当前结果 **72/72 identical**（两个分支相同：引擎代码在本分支除派发适配外未改动）。
 
 当前结果：`npm test` 31/31 通过；benchmark 串行约 488 ms、`maxConcurrency=4` 约 118 ms。测试直接加载已发布 DSH 的 ToolRuntime，覆盖依赖引用、滚动调度、独占屏障、并发上限、权限拒绝、审批渠道缺失、作用域限制、上下文传递、回合结束、递归防护、取消收敛、卸载、trace；编译器侧覆盖 prompt 哈希、解析/调度/替换/joiner 单元、以及一次走真实工具注册表的端到端编译（含重规划与空计划）。
