@@ -51,6 +51,8 @@ dsh --profile web --dump-config
 
 合成配置中应出现 `id: tool-dag`。编译器臂默认**不**注册，需自行追加（见下）。
 
+> **切分支后必须重装依赖。** 两个分支锁定的 DSH 版本不同，而 `node_modules` 只有一份。切换分支后先 `rm -rf node_modules package-lock.json && npm install`，否则会用错版本的类型编译，表现为 `'calls' does not exist in type 'ToolExecutionInput'` 这类报错。
+
 本项目通过 `dsh.bundle.patch` 注册插件，工具通过 Cordis 的 `tools` 服务挂载。GitHub 源码需要先编译并打包，npm registry 的包名安装待 npm 发布后可用。
 
 ## 工具臂：`dag_execute`
