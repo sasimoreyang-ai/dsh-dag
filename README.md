@@ -15,17 +15,17 @@
 
 | 分支 | DSH 版本 | cordis | 说明 |
 | --- | --- | --- | --- |
-| `main` | `0.2.0-rc.2` | `~4.0.4` | 只有工具臂 |
-| `feat/llmcompiler-dag` | **`0.2.1-alpha.2`** | `~4.0.5-alpha.1` | 工具臂 + 编译器臂；对齐参考实现（LLMCompiler × ParallelQA）实际跑过的 DSH 版本 |
-| `feat/llmcompiler-dag-0.2.2-rc.1` | `0.2.2-rc.1` | `~4.1.0` | 同实现；因 `dsh-tools` 改成批量派发而做了适配 |
+| **`main`** | **`0.2.2-rc.1`** | `~4.1.0` | 主线：工具臂 + 编译器臂 |
+| `feat/llmcompiler-dag` | `0.2.1-alpha.2` | `~4.0.5-alpha.1` | 同一套实现，对齐参考实现（LLMCompiler × ParallelQA）实际跑过的 DSH 版本 |
+| `dsh-0.2.0-rc.2`（归档） | `0.2.0-rc.2` | `~4.0.4` | 主线迁移前的状态，只有工具臂 |
 
 所有 DSH peer dependency 都锁在对应版本；`peerDependencies` 与 `devDependencies` 的版本必须同步改，否则 `npm install` 会因 peer 冲突失败。
 
-### 0.2.2-rc.1 的破坏性变化与本分支的适配
+### 0.2.2-rc.1 的破坏性变化与主线的适配
 
 `0.2.2-rc.1` 重做了工具派发链路，编译器引擎本身没有改动，适配都在边界上：
 
-| `dsh-tools` 变化 | 影响 | 本分支的做法 |
+| `dsh-tools` 变化 | 影响 | 主线的做法 |
 | --- | --- | --- |
 | `tools.execute` 由单调用变批量：`ToolBatchInput { calls: ToolCallBlock[], signal, agent?, toolSet?, log? }` → `ToolBatchResult { results, additionalContexts, concluded }`；`ToolCallBlock.arguments` 是**模型产出的 JSON 字符串** | 图节点与计划任务都不能再单发 | 一个节点/任务 = 一次批量为 1 的调用，参数 `JSON.stringify` 后放入 `arguments` |
 | 执行被委派给外部 `ToolExecutor`：未 `setExecutor` 时 `tools.execute` 抛 `ToolExecutorUnavailableError` | 测试与基准脚本原本直接派发，现在需要执行器 | 真实 profile 由 agent loop 提供；测试与 benchmark 通过 `@deepseek-ai/dsh-tools/pipeline` 装载公开管线（`tests/fixtures/executor.mjs`） |
@@ -34,14 +34,14 @@
 | `register(definition, options?: { when })`、`get(name, scope?, toolSet?)` 新增 `toolSet` 概念 | 条件注册的工具需要本步准入集才可见 | 本插件的工具都不条件注册，未使用 `toolSet` |
 | 移除 `presentAs` / PTC 呈现模式 / `./invariant` 伴随插件 | — | 本插件未依赖这些接口；无流文法校验器，故编译器臂仍按参考实现只发 `text-delta` / `usage` / `finish` |
 
-引擎行为、prompt 与解析语义与 `feat/llmcompiler-dag`（0.2.1-alpha.2）分支**完全相同**，两个分支的差异只在上面这张表里。
+引擎行为、prompt 与解析语义与 `feat/llmcompiler-dag`（0.2.1-alpha.2）分支**完全相同**，两条线的代码差异只在上面这张表里。
 
 ## 安装
 
 需要 Node.js 22+、npm 和对应版本的 DSH。
 
 ```sh
-git checkout feat/llmcompiler-dag        # 或 feat/llmcompiler-dag-0.2.2-rc.1
+git checkout main                        # 0.2.2-rc.1；或 feat/llmcompiler-dag（0.2.1-alpha.2）
 npm ci
 npm test
 npm pack
