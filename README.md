@@ -38,6 +38,8 @@ dsh --profile web --dump-config
 
 本项目通过 `dsh.bundle.patch` 注册插件，工具通过 Cordis 的 `tools` 服务挂载。GitHub 源码需要先编译并打包，npm registry 的包名安装待 npm 发布后可用。
 
+> **切分支后必须重装依赖。** 两个分支锁定的 DSH 版本不同，而 `node_modules` 只有一份。切换分支后先 `rm -rf node_modules package-lock.json && npm install`，否则会用错版本的类型编译，表现为 `'calls' does not exist in type 'ToolExecutionInput'` 之类的报错。
+
 ## 工具臂：`dag_execute`
 
 模型调用 `dag_execute` 提交节点、工具参数和依赖关系。插件在依赖满足后调度节点，独立且声明并发安全的工具可以同时执行。原生 Agent 负责规划、理解结果与后续决策。
