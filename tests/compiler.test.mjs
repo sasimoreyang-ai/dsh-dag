@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { rmSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
@@ -144,13 +148,16 @@ class LlmFixture extends Service {
 
 const text = value => [{ type: 'text-delta', index: 0, text: value }, { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } }, { type: 'finish', reason: { kind: 'stop' } }]
 
+const metricsFile = join(tmpdir(), 'dsh-dag-metrics-test.jsonl')
+
 async function harness(t, { respond, config = {} }) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
   loadExecutor(ctx)
   await ctx.plugin(LlmFixture, respond)
-  await ctx.plugin(compiler, { provider: 'fixture', model: 'fixture', trace: false, ...config })
+  rmSync(metricsFile, { force: true })
+  await ctx.plugin(compiler, { provider: 'fixture', model: 'fixture', trace: false, metricsPath: metricsFile, ...config })
   t.after(() => ctx.fiber.dispose())
   const executed = []
   const register = (name, execute) => ctx.tools.register({
@@ -348,4 +355,49 @@ test('the configured reasoning effort reaches both planner and joiner calls', as
   for await (const chunk of ctx.waterfall('llm/stream', loopRequest('q'), () => { throw new Error('adapter') })) chunks.push(chunk)
   assert.ok(llm.calls.length >= 2)
   assert.ok(llm.calls.every(call => call.reasoningEffort === 'off'))
+})
+
+test('the metrics record carries the reference per-action counters and task shape', async t => {
+  const { ctx, register } = await harness(t, {
+    respond: (options, index) => index === 1
+      ? text('1. search("A")\n2. search("B")\n3. math("diff", ["$1", "$2"])\n4. join()<END_OF_PLAN>')
+      : text('Action: Finish(42)'),
+  })
+  register('search', async args => `page:${args.entity}`)
+  register('math', async () => '42')
+  const chunks = []
+  for await (const chunk of ctx.waterfall('llm/stream', loopRequest('q'), () => { throw new Error('adapter') })) chunks.push(chunk)
+  const record = JSON.parse(readFileSync(metricsFile, 'utf8').trim().split('\n').at(-1))
+  assert.equal(record.searchCalls, 2)
+  assert.equal(record.mathCalls, 1)
+  // The reference reports exactly these task fields; `thought` stays internal.
+  assert.deepEqual(Object.keys(record.tasks[0]).sort(),
+    ['args', 'deps', 'id', 'ms', 'observation', 'resolvedArgs', 'tool'])
+})
+
+test('a failed model call keeps the provider message and code', async () => {
+  const deps = {
+    stream: () => (async function* failing() {
+      yield { type: 'text-delta', index: 0, text: '' }
+      yield { type: 'finish', reason: { kind: 'error', failure: { message: 'upstream exploded', code: 'PROVIDER_500' } } }
+    })(),
+    execute: async () => ({ isError: false, value: 'v', content: [{ type: 'text', text: 'v' }] }),
+  }
+  const settings = {
+    provider: 'p', model: 'm', temperature: 0, maxTokens: 16, maxReplans: 0,
+    tools: defaultTools(), callIdPrefix: 'dag',
+  }
+  await assert.rejects(
+    () => runCompiler(deps, settings, 'q', new AbortController().signal),
+    error => error.name === 'LlmCallError' && error.code === 'PROVIDER_500' && error.message === 'upstream exploded',
+  )
+  // A reason with no failure still falls back to the reference wording.
+  const bare = {
+    ...deps,
+    stream: () => (async function* aborted() { yield { type: 'finish', reason: { kind: 'aborted' } } })(),
+  }
+  await assert.rejects(
+    () => runCompiler(bare, settings, 'q', new AbortController().signal),
+    error => error.code === 'LLM_FAILURE' && error.message === 'model call failed',
+  )
 })

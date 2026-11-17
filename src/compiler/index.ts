@@ -28,12 +28,12 @@ import { isAgentLoopRequest, type GenerateOptions, type StreamChunk } from '@dee
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Config, type Config as CompilerConfig } from './config.js'
 import {
-  buildArguments, callModel, observationOf, runCompiler, CompilerLlmError,
+  buildArguments, callModel, observationOf, runCompiler, LlmCallError,
   type CompilerDeps, type CompilerMetrics,
 } from './engine.js'
 
 export { Config }
-export { runCompiler, callModel, buildArguments, observationOf, CompilerLlmError }
+export { runCompiler, callModel, buildArguments, observationOf, LlmCallError }
 export type { CompilerMetrics, CompilerDeps, CompilerSettings } from './engine.js'
 export type { ToolSpec } from './prompts.js'
 export { defaultTools, plannerSystemPrompt, JOINER_PROMPT, END_OF_PLAN } from './prompts.js'

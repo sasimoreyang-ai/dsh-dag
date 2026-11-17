@@ -1,6 +1,6 @@
 {
   "name": "@sasimoreyang-ai/dsh-dag",
-  "version": "0.2.0-rc.1",
+  "version": "0.2.1-rc.1",
   "description": "Dependency-aware tool execution and LLMCompiler graph execution for DeepSeek Harness 0.2.2-rc.1",
   "type": "module",
   "main": "lib/index.js",

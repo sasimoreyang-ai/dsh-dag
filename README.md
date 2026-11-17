@@ -156,7 +156,7 @@ llm/stream waterfall
 | `plannerPrompt` / `joinerPrompt` | 内置 | 覆盖内置 prompt（默认值见下） |
 | `detect` | `heuristic` | 接管判据：`heuristic`=参考实现的结构启发式（默认）；`marker`=只认 loop 官方标记；`either`=两者取或 |
 | `emptyAnswer` | `diagnostic` | 编译没产出答案时怎么办：`diagnostic` 在 assistant 文本里说明；`error` 以 `DAG_COMPILER_EMPTY_ANSWER` 失败 |
-| `metricsPath` | 不设置 | 可选 JSONL，逐轮落一条引擎记录 |
+| `metricsPath` | 不设置 | 可选 JSONL，逐轮落一条引擎记录（字段与参考实现相同：三段耗时、token、任务/波数、`searchCalls`/`mathCalls`、`replans`、逐任务观测、answer） |
 | `callIdPrefix` | `dag` | 派发时构造 call id 的前缀 |
 | `trace` | `true` | 向 host 日志输出 `dag.compiler.trace` 结构化记录 |
 
@@ -188,7 +188,7 @@ llm/stream waterfall
   `dag-compiler produced no answer (0 plan tasks, 3 model calls); joiner said: ...`；
   配 `emptyAnswer: error` 则以 `DAG_COMPILER_EMPTY_ANSWER` 失败。改成诊断而不是空字符串，是因为无头场景下空文本会被当成"成功但没内容"。
 - **thinking 模型要注意**：planner/joiner 若让模型把预算花在思考上、content 返回空，就会走到上面那条无答案路径。显式配 `reasoningEffort: 'off'`（或调大 `maxTokens`）可避免；参考实现在 DeepSeek 方言下正是靠适配器默认关思考才拿到干净 content。
-- **验证通道**：host logger 不一定会把 `dag.compiler.trace` 落到 stderr。要看"这一轮到底有没有被编译"，配 `metricsPath: /path/engine.jsonl`，引擎会逐轮追加一条记录（含 planner/joiner 耗时、任务数、波数、重规划次数、answer）。
+- **验证通道**：host logger 不一定会把 `dag.compiler.trace` 落到 stderr。要看"这一轮到底有没有被编译"，配 `metricsPath: /path/engine.jsonl`，引擎会逐轮追加一条记录（含 planner/joiner 耗时、任务数、波数、`searchCalls`/`mathCalls` 计数、重规划次数、answer）。这些字段与参考实现逐字对齐，所以 liuyang 的 `summarize.mjs` / `run_bench.mjs` 可以直接读我们的记录出表。
 
 ```yaml
 - id: dag-compiler
@@ -248,6 +248,10 @@ node /path/to/dsh-dag/scripts/e2e/headless-check.mjs /path/to/dsh-dag/sasimoreya
 当前结果：`npm test` 31/31 通过；benchmark 串行约 488 ms、`maxConcurrency=4` 约 118 ms。测试直接加载已发布 DSH 的 ToolRuntime，覆盖依赖引用、滚动调度、独占屏障、并发上限、权限拒绝、审批渠道缺失、作用域限制、上下文传递、回合结束、递归防护、取消收敛、卸载、trace；编译器侧覆盖 prompt 哈希、解析/调度/替换/joiner 单元、以及一次走真实工具注册表的端到端编译（含重规划与空计划）。
 
 真实任务的收益仍需比较原生 DSH 基线，测量任务成功率、端到端耗时、模型轮数、token 用量及工具耗时。原生 DSH 已能并行执行同一轮中的安全工具，编译器臂的潜在增量来自预先表达跨轮依赖与减少模型决策往返。
+
+## 变更
+
+- **0.2.1-rc.1**：metrics 记录补齐参考实现的 `searchCalls` / `mathCalls` 计数与字段集（`tasks[]` 不再含内部的 `thought`）；模型调用失败时透传 provider 的 `failure.message` / `failure.code`（无 failure 时回落到参考实现的 `model call failed` / `LLM_FAILURE`），宿主的重试策略因此能按真实 code（`RATE_LIMIT`/`SERVER`/`TIMEOUT`/`TRANSPORT`/`EMPTY_RESPONSE`）动作。错误类更名为 `LlmCallError`（与参考实现同名）。引擎控制流经 13 场景差分与参考实现逐字一致。
 
 ## 设计参考与许可
 

@@ -89,8 +89,12 @@ export interface ExecutedTask {
   deps: number[]
   ms: number
   observation: string
+  /** Kept for the scratchpad; the reference omits it from the reported tasks. */
   thought: string
 }
+
+/** One task as it appears in the metrics record, matching the reference shape. */
+export type ReportedTask = Omit<ExecutedTask, 'thought'>
 
 /** Measurements for one compiled turn. */
 export interface CompilerMetrics {
@@ -104,9 +108,13 @@ export interface CompilerMetrics {
   planTasks: number
   planWaves: number
   maxWidth: number
+  /** Calls to the `search` action, as the reference counts them. */
+  searchCalls: number
+  /** Calls to the `math` action, as the reference counts them. */
+  mathCalls: number
   replans: number
   plans: { question: string, round: number, plan: string, tasks: { id: number, tool: string, args: PlanArgument[], deps: number[] }[] }[]
-  tasks: ExecutedTask[]
+  tasks: ReportedTask[]
   /** Strict joiner answer — the model-facing answer, exactly as parsed. */
   answer: string
   /** Loosely parsed answer: what a caller may prefer when `answer` is empty. */
@@ -115,12 +123,12 @@ export interface CompilerMetrics {
 }
 
 /** A failed auxiliary model call, carrying the model's failure code. */
-export class CompilerLlmError extends Error {
+export class LlmCallError extends Error {
   readonly code: string
 
   constructor(message: string, code: string) {
     super(message)
-    this.name = 'CompilerLlmError'
+    this.name = 'LlmCallError'
     this.code = code
   }
 }
@@ -162,10 +170,11 @@ export async function callModel(
     } else if (chunk.type === 'finish') reason = chunk.reason
   }
   if (reason !== undefined && reason.kind !== 'stop' && reason.kind !== 'max-tokens' && reason.kind !== 'tool-calls') {
-    // The reference engine reads `reason.failure` here; this host's aborted and
-    // error reasons carry it, so keep the reference's fallback wording when a
-    // reason has none.
-    throw new CompilerLlmError('model call failed', 'LLM_FAILURE')
+    // Same rule as the reference: surface the provider's own message and code
+    // when the finish reason carries a failure, so the host's retry policy and
+    // the operator both keep the real cause.
+    const failure = 'failure' in reason ? reason.failure : undefined
+    throw new LlmCallError(failure?.message ?? 'model call failed', failure?.code ?? 'LLM_FAILURE')
   }
   return { text, ms: Date.now() - started, inputTokens, outputTokens, totalTokens, stopReason: reason?.kind }
 }
@@ -256,7 +265,8 @@ export async function runCompiler(
   const metrics: CompilerMetrics = {
     plannerMs: 0, executeMs: 0, joinerMs: 0,
     llmCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0,
-    planTasks: 0, planWaves: 0, maxWidth: 0, replans: 0,
+    planTasks: 0, planWaves: 0, maxWidth: 0,
+    searchCalls: 0, mathCalls: 0, replans: 0,
     plans: [], tasks: [], answer: '', answerTolerant: '', joinerRaw: '',
   }
   let previousContext = ''
@@ -353,6 +363,9 @@ export async function runCompiler(
           id: task.id, tool: task.tool, args: task.args, resolvedArgs: args, deps: task.deps,
           ms: Date.now() - taskStart, observation: stored, thought: task.thought,
         })
+        // The reference's per-action counters, by tool name.
+        if (task.tool === 'search') metrics.searchCalls += 1
+        else if (task.tool === 'math') metrics.mathCalls += 1
         deps.trace?.('task-end', { round, id: task.id, tool: task.tool, ms: Date.now() - taskStart })
       }
       // The reference sends the whole wave at once; a positive cap only narrows
@@ -362,7 +375,8 @@ export async function runCompiler(
       }
     }
     metrics.executeMs += Date.now() - started
-    metrics.tasks = perTask
+    // The reported task keeps the reference's field set; `thought` stays internal.
+    metrics.tasks = perTask.map(({ thought, ...rest }) => rest)
 
     const scratchpad = perTask
       .map(task => `Thought: ${task.thought}\n${task.tool}(${stringifyArgs(task.resolvedArgs)})\nObservation: ${task.observation}\n`)
